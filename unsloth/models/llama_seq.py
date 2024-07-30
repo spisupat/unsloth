@@ -1604,12 +1604,12 @@ class FastLlamaModelSequenceClassification:
         model.config.update({"unsloth_version" : __version__})
 
         # We also do this for the score
-        score = torch.nn.Linear(1, 1, bias = None)
-        del score.weight
-        score.weight = model.get_output_embeddings().weight
-        score.in_features  = score.weight.shape[1]
-        score.out_features = score.weight.shape[0]
-        model.score = score
+        # score = torch.nn.Linear(1, 1, bias = None)
+        # del score.weight
+        # score.weight = model.get_output_embeddings().weight
+        # score.in_features  = score.weight.shape[1]
+        # score.out_features = score.weight.shape[0]
+        # model.score = score
         
         # Also patch all dtypes - BnB seems to not allocate the correct type?
         # BnB default dtype seems to be float16!
