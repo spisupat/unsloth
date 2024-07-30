@@ -1610,6 +1610,7 @@ class FastLlamaModelSequenceClassification:
         # score.in_features  = score.weight.shape[1]
         # score.out_features = score.weight.shape[0]
         # model.score = score
+        score = model.score
         
         # Also patch all dtypes - BnB seems to not allocate the correct type?
         # BnB default dtype seems to be float16!
