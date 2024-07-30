@@ -19,6 +19,7 @@ from typing import Optional, Tuple, List, Union
 from ._utils import *
 from ._utils import __version__
 from torch.nn.functional import scaled_dot_product_attention
+from transformers import __version__ as transformers_version
 from transformers.models.llama.modeling_llama import (
     logger,
     BaseModelOutputWithPast,
@@ -1285,10 +1286,10 @@ class FastLlamaModelSequenceClassification:
         max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
 
         statistics = \
-           f"==((====))==  Unsloth: Fast {model_patcher.__name__[4:-5]} patching release {__version__}\n"\
+           f"==((====))==  Unsloth {__version__}: Fast {model_patcher.__name__[4:-5]} patching. Transformers = {transformers_version}.\n"\
            f"   \\\   /|    GPU: {gpu_stats.name}. Max memory: {max_memory} GB. Platform = {platform_system}.\n"\
            f"O^O/ \_/ \\    Pytorch: {torch.__version__}. CUDA = {gpu_stats.major}.{gpu_stats.minor}. CUDA Toolkit = {torch.version.cuda}.\n"\
-           f"\        /    Bfloat16 = {str(SUPPORTS_BFLOAT16).upper()}. Xformers = {xformers_version}. FA = {HAS_FLASH_ATTENTION}.\n"\
+           f"\        /    Bfloat16 = {str(SUPPORTS_BFLOAT16).upper()}. FA [Xformers = {xformers_version}. FA2 = {HAS_FLASH_ATTENTION}]\n"\
            f' "-____-"     Free Apache license: http://github.com/unslothai/unsloth'
         print(statistics)
 
@@ -1671,9 +1672,82 @@ class FastLlamaModelSequenceClassification:
         transformers_set_seed(random_state)
 
         if isinstance(model, PeftModelForSequenceClassification):
-            raise TypeError(
-                "Unsloth: Your model already has LoRA adapters. No need to run this again!"
+            # Check if exactly the same and then pass through!
+            assert(hasattr(model, "peft_config"))
+
+            peft_config = model.peft_config["default"].to_dict()
+            check_parameters = [
+                "r", "lora_alpha", "lora_dropout",
+                "bias", "layers_to_transform", "layers_pattern",
+                "use_rslora", "init_lora_weights",
+            ]
+            check_all = True
+            for param in check_parameters:
+                check_all = check_all and (peft_config[param] == eval(param))
+            pass
+
+            # Check save_modules
+            old_target_modules = list(peft_config["target_modules"])
+            modules_to_save = peft_config["modules_to_save"]
+            if modules_to_save is None: modules_to_save = {}
+            modules_to_save = list(modules_to_save)
+            old_target_modules += modules_to_save
+
+            # Combine all
+            new_target_modules = list(target_modules) + \
+                list(modules_to_save if modules_to_save is not None else [])
+
+            # Now check!
+            new_target_modules = set(new_target_modules)
+            check_all = check_all and (
+                len(set(old_target_modules) ^ new_target_modules) == 0
             )
+
+            check_all = check_all and (
+                (loftq_config == {} or loftq_config is None) and \
+                (peft_config["loftq_config"] == {} or peft_config["loftq_config"] is None)
+            )
+
+            if check_all:
+                # Simply pass through!
+                logger.warning(
+                    "Unsloth: Already have LoRA adapters! We shall skip this step."
+                )
+
+                # Offload!
+                # [TODO] First offload score and embed_tokens to CPU (should be disk!!)
+                if "embed_tokens" in new_target_modules:
+                    print("Unsloth: Casting embed_tokens to float32")
+
+                    model.model.model.embed_tokens.modules_to_save.default\
+                        .to(device = "cuda:0", dtype = torch.float32, non_blocking = True)
+                    model.model.model.embed_tokens.modules_to_save.default.requires_grad_(True)
+
+                    # [TODO] Move old embed_tokens to CPU - should be disk!
+                    model.model.model.embed_tokens.original_module\
+                        .to(device = "cpu", non_blocking = True)
+                    model.model.model.embed_tokens.original_module.requires_grad_(False)
+                pass
+
+                if "score" in new_target_modules:
+                    print("Unsloth: Casting score to float32")
+
+                    model.model.score.modules_to_save.default\
+                        .to(device = "cuda:0", dtype = torch.float32, non_blocking = True)
+                    model.model.score.modules_to_save.default.requires_grad_(True)
+
+                    # [TODO] Move old score to CPU - should be disk!
+                    model.model.score.original_module\
+                        .to(device = "cpu", non_blocking = True)
+                    model.model.score.original_module.requires_grad_(False)
+                pass
+
+                return model
+            else:
+            
+                raise TypeError(
+                    "Unsloth: Your model already has LoRA adapters. No need to run this again!"
+                )
         pass
 
         if loftq_config is None: loftq_config = {}
@@ -1848,7 +1922,7 @@ class FastLlamaModelSequenceClassification:
         _saved_temp_tokenizer = model._saved_temp_tokenizer
 
         lora_config = LoraConfig(**arguments)
-        
+
         # First offload score and embed_tokens to disk
         input_embeddings_device  = model. get_input_embeddings().weight.device
         output_embeddings_device = model.get_output_embeddings().weight.device
