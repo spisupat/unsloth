@@ -891,12 +891,12 @@ def Sequence_fast_forward(fast_forward_inference):
 
         hidden_states = outputs[0]
         bsz, q_len, hd = hidden_states.shape
-        lm_head = self.lm_head.weight
+        score = self.score.weight
         if bsz == 1 and q_len == 1:
-            logits = torch.mv(lm_head, hidden_states.ravel().to(lm_head.dtype))
+            logits = torch.mv(score, hidden_states.ravel().to(score.dtype))
             logits = logits.unsqueeze(0).unsqueeze(0)
         else:
-            logits = self.lm_head(hidden_states.to(lm_head.dtype))
+            logits = self.score(hidden_states.to(score.dtype))
         pass
         logits = logits.to(self.config.torch_dtype)
         
@@ -1413,8 +1413,7 @@ class FastLlamaModelSequenceClassification:
             trust_remote_code = trust_remote_code,
         )
 
-        model.lm_head = model.score
-        model.get_output_embeddings = lambda: model.lm_head
+        model.get_output_embeddings = lambda: model.score
         model, tokenizer = patch_tokenizer(model, tokenizer)
         model = model_patcher.post_patch(model)
 
@@ -1604,17 +1603,17 @@ class FastLlamaModelSequenceClassification:
         model.set_input_embeddings(torch.nn.Embedding.from_pretrained(model.get_input_embeddings().weight))
         model.config.update({"unsloth_version" : __version__})
 
-        # We also do this for the lm_head
-        lm_head = torch.nn.Linear(1, 1, bias = None)
-        del lm_head.weight
-        lm_head.weight = model.get_output_embeddings().weight
-        lm_head.in_features  = lm_head.weight.shape[1]
-        lm_head.out_features = lm_head.weight.shape[0]
-        model.lm_head = lm_head
+        # We also do this for the score
+        score = torch.nn.Linear(1, 1, bias = None)
+        del score.weight
+        score.weight = model.get_output_embeddings().weight
+        score.in_features  = score.weight.shape[1]
+        score.out_features = score.weight.shape[0]
+        model.score = score
         
         # Also patch all dtypes - BnB seems to not allocate the correct type?
         # BnB default dtype seems to be float16!
-        correct_dtype = lm_head.weight.dtype
+        correct_dtype = score.weight.dtype
 
         for name, module in model.named_modules():
             if isinstance(module, (Bnb_Linear4bit, Peft_Linear4bit)):
@@ -1755,18 +1754,18 @@ class FastLlamaModelSequenceClassification:
             modules_to_save = list(modules_to_save)
         pass
 
-        train_lm_head = False
+        train_score = False
         train_embed_tokens = False
         final_modules = []
         for module in target_modules:
-            if module == "lm_head":
+            if module == "score":
                 # logger.warning_once(
-                #     "Unsloth: `lm_head` should be placed in `modules_to_save` and not `target_modules`. "\
+                #     "Unsloth: `score` should be placed in `modules_to_save` and not `target_modules`. "\
                 #     "Luckily, we shall do it for you!"
                 # )
-                train_lm_head = True
-                if modules_to_save is None: modules_to_save = ["lm_head"]
-                else: modules_to_save.append("lm_head")
+                train_score = True
+                if modules_to_save is None: modules_to_save = ["score"]
+                else: modules_to_save.append("score")
 
             elif module == "embed_tokens":
                 # logger.warning_once(
@@ -1784,43 +1783,43 @@ class FastLlamaModelSequenceClassification:
 
         # Check if we added new tokens!
         if hasattr(model, "_need_to_train_embeddings"):
-            if not train_lm_head or not train_embed_tokens:
+            if not train_score or not train_embed_tokens:
                 print(
                     "Unsloth: You added new tokens but did not specify if you wanted to "\
-                    "train the lm_head and embed_tokens.\nWe must turn it on for you."
+                    "train the score and embed_tokens.\nWe must turn it on for you."
                 )
-                train_lm_head = True
+                train_score = True
                 train_embed_tokens = True
 
                 if modules_to_save is None: modules_to_save = ["embed_tokens"]
                 else: modules_to_save.append("embed_tokens")
 
-                if modules_to_save is None: modules_to_save = ["lm_head"]
-                else: modules_to_save.append("lm_head")
+                if modules_to_save is None: modules_to_save = ["score"]
+                else: modules_to_save.append("score")
             pass
         pass
 
         # Check for Llama-3
         # if hasattr(model._saved_temp_tokenizer, "_using_llama3_template"):
-        #     if not train_embed_tokens and not train_lm_head:
+        #     if not train_embed_tokens and not train_score:
         #         raise RuntimeError("")
 
         # First fix untrained tokens
         # Wrong - can cause reserved tokens to pop out!!
-        # if train_embed_tokens or train_lm_head:
+        # if train_embed_tokens or train_score:
         #     fix_untrained_tokens(model, eps = 1e-16)
         # pass
 
         # Check modules_to_save
         if modules_to_save is not None:
             for module in modules_to_save:
-                if module == "lm_head":
-                    train_lm_head = True
+                if module == "score":
+                    train_score = True
                 elif module == "embed_tokens":
                     train_embed_tokens = True
                 else:
                     raise TypeError(
-                        f"Unsloth: Module = {module} is not allowed. Only 'lm_head' and 'embed_tokens' is allowed."
+                        f"Unsloth: Module = {module} is not allowed. Only 'score' and 'embed_tokens' is allowed."
                     )
             pass
         pass
@@ -1849,7 +1848,7 @@ class FastLlamaModelSequenceClassification:
 
         lora_config = LoraConfig(**arguments)
         
-        # First offload lm_head and embed_tokens to disk
+        # First offload score and embed_tokens to disk
         input_embeddings_device  = model. get_input_embeddings().weight.device
         output_embeddings_device = model.get_output_embeddings().weight.device
 
@@ -1865,7 +1864,7 @@ class FastLlamaModelSequenceClassification:
                 torch.cuda.empty_cache()
             pass
 
-            if train_lm_head:
+            if train_score:
                 print("Unsloth: Offloading output_embeddings to disk to save VRAM")
                 offload_output_embeddings(model, temporary_location)
             pass
@@ -1883,7 +1882,7 @@ class FastLlamaModelSequenceClassification:
 
         model = FastLlamaModelSequenceClassification.patch_peft_model(model, use_gradient_checkpointing)
 
-        # Now patch lm_head and embed_tokens
+        # Now patch score and embed_tokens
         if train_embed_tokens:
             print("Unsloth: Casting embed_tokens to float32")
             assert(hasattr(model.model.model.embed_tokens, "modules_to_save"))
@@ -1892,12 +1891,12 @@ class FastLlamaModelSequenceClassification:
             model.model.model.embed_tokens.modules_to_save.default.requires_grad_(True)
         pass
 
-        if train_lm_head:
-            print("Unsloth: Casting lm_head to float32")
-            assert(hasattr(model.model.lm_head, "modules_to_save"))
-            model.model.lm_head.modules_to_save.default\
+        if train_score:
+            print("Unsloth: Casting score to float32")
+            assert(hasattr(model.model.score, "modules_to_save"))
+            model.model.score.modules_to_save.default\
                 .to(device = "cuda:0", dtype = torch.float32, non_blocking = True)
-            model.model.lm_head.modules_to_save.default.requires_grad_(True)
+            model.model.score.modules_to_save.default.requires_grad_(True)
         pass
 
         # Patch tokenizer to pad to the right
@@ -2125,13 +2124,13 @@ class FastLlamaModelSequenceClassification:
             internal_model.training = False
         pass
 
-        # Also check if lm_head / embeddings are trained
+        # Also check if score / embeddings are trained
         internal_model = model
-        while not hasattr(internal_model, "lm_head"):
+        while not hasattr(internal_model, "score"):
             internal_model = internal_model.model
         pass
-        lm_head = internal_model.lm_head.weight
-        device_type = lm_head.device.type
+        score = internal_model.score.weight
+        device_type = score.device.type
         dtype = model.config.torch_dtype
         
         if type(dtype) is str:
