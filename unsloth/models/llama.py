@@ -18,6 +18,7 @@ from typing import Optional, Tuple, List, Union
 from ._utils import *
 from ._utils import __version__
 from torch.nn.functional import scaled_dot_product_attention
+from transformers import __version__ as transformers_version
 from transformers.models.llama.modeling_llama import (
     logger,
     BaseModelOutputWithPast,
@@ -1281,7 +1282,7 @@ class FastLlamaModel:
         max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
 
         statistics = \
-           f"==((====))==  Unsloth: Fast {model_patcher.__name__[4:-5]} patching release {__version__}\n"\
+           f"==((====))==  Unsloth {__version__}: Fast {model_patcher.__name__[4:-5]} patching. Transformers = {transformers_version}.\n"\
            f"   \\\   /|    GPU: {gpu_stats.name}. Max memory: {max_memory} GB. Platform = {platform_system}.\n"\
            f"O^O/ \_/ \\    Pytorch: {torch.__version__}. CUDA = {gpu_stats.major}.{gpu_stats.minor}. CUDA Toolkit = {torch.version.cuda}.\n"\
            f"\        /    Bfloat16 = {str(SUPPORTS_BFLOAT16).upper()}. FA [Xformers = {xformers_version}. FA2 = {HAS_FLASH_ATTENTION}]\n"\
@@ -2063,9 +2064,9 @@ class FastLlamaModel:
                     (getattr(gate_proj, "base_layer", gate_proj).bias is None) and \
                     (getattr(  up_proj, "base_layer",   up_proj).bias is None) and \
                     (getattr(down_proj, "base_layer", down_proj).bias is None) and \
-                    (len(getattr(gate_proj, "lora_magnitude_vector", [])) == 0) and \
-                    (len(getattr(  up_proj, "lora_magnitude_vector", [])) == 0) and \
-                    (len(getattr(down_proj, "lora_magnitude_vector", [])) == 0):
+                    (len(getattr(gate_proj, "lora_magnitude_vector", []) or []) == 0) and \
+                    (len(getattr(  up_proj, "lora_magnitude_vector", []) or []) == 0) and \
+                    (len(getattr(down_proj, "lora_magnitude_vector", []) or []) == 0):
 
                     # https://stackoverflow.com/questions/50599045/python-replacing-a-function-within-a-class-of-a-module
                     layer.mlp.forward = types.MethodType(apply_lora_mlp, layer.mlp)
@@ -2087,9 +2088,9 @@ class FastLlamaModel:
                     (getattr(q_proj, "base_layer", q_proj).bias is None) and \
                     (getattr(k_proj, "base_layer", k_proj).bias is None) and \
                     (getattr(v_proj, "base_layer", v_proj).bias is None) and \
-                    (len(getattr(q_proj, "lora_magnitude_vector", [])) == 0) and \
-                    (len(getattr(k_proj, "lora_magnitude_vector", [])) == 0) and \
-                    (len(getattr(v_proj, "lora_magnitude_vector", [])) == 0):
+                    (len(getattr(q_proj, "lora_magnitude_vector", []) or []) == 0) and \
+                    (len(getattr(k_proj, "lora_magnitude_vector", []) or []) == 0) and \
+                    (len(getattr(v_proj, "lora_magnitude_vector", []) or []) == 0):
 
                     layer.self_attn.apply_qkv = apply_lora_qkv
                     n_qkv += 1
@@ -2106,7 +2107,7 @@ class FastLlamaModel:
                 o_proj = layer.self_attn.o_proj
                 if hasattr(o_proj, "lora_A") and \
                     (getattr(o_proj, "base_layer", o_proj).bias is None) and \
-                    (len(getattr(o_proj, "lora_magnitude_vector", [])) == 0):
+                    (len(getattr(o_proj, "lora_magnitude_vector", []) or []) == 0):
 
                     layer.self_attn.apply_o = apply_lora_o
                     n_o += 1
