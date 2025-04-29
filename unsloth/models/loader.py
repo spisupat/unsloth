@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .llama import FastLlamaModel, logger
+from .llama_seq import FastLlamaModelSequenceClassification
 from .mistral import FastMistralModel
 from .qwen2 import FastQwen2Model
 from transformers import AutoConfig
@@ -27,7 +28,7 @@ transformers_version = Version(transformers_version)
 SUPPORTS_FOURBIT = transformers_version >= Version("4.37")
 SUPPORTS_GEMMA   = transformers_version >= Version("4.38")
 SUPPORTS_GEMMA2  = transformers_version >= Version("4.42")
-SUPPORTS_LLAMA31 = transformers_version >= Version("4.43.1")
+SUPPORTS_LLAMA31 = transformers_version >= Version("4.43.2")
 if SUPPORTS_GEMMA:
     from .gemma  import FastGemmaModel
 if SUPPORTS_GEMMA2:
@@ -35,9 +36,14 @@ if SUPPORTS_GEMMA2:
 pass
 
 
-def _get_model_name(model_name, load_in_4bit = True):
+def __get_model_name(
+    model_name,
+    load_in_4bit = True,
+    INT_TO_FLOAT_MAPPER = None,
+    FLOAT_TO_INT_MAPPER = None,
+):
 
-    if not SUPPORTS_FOURBIT and model_name in INT_TO_FLOAT_MAPPER:
+    if not SUPPORTS_FOURBIT and model_name.lower() in INT_TO_FLOAT_MAPPER:
         model_name = INT_TO_FLOAT_MAPPER[model_name.lower()]
         logger.warning_once(
             f"Unsloth: Your transformers version of {transformers_version} does not support native "\
@@ -46,33 +52,79 @@ def _get_model_name(model_name, load_in_4bit = True):
             f"to obtain the latest transformers build, then restart this session.\n"\
             f"For now, we shall load `{model_name}` instead (still 4bit, just slower downloading)."
         )
+        return model_name
     
-    elif not load_in_4bit and model_name in INT_TO_FLOAT_MAPPER:
+    elif not load_in_4bit and model_name.lower() in INT_TO_FLOAT_MAPPER:
         new_model_name = INT_TO_FLOAT_MAPPER[model_name.lower()]
         # logger.warning_once(
         #     f"Unsloth: You passed in `{model_name}` which is a 4bit model, yet you set\n"\
         #     f"`load_in_4bit = False`. We shall load `{new_model_name}` instead."
         # )
-        model_name = new_model_name
+        return new_model_name
 
-    elif load_in_4bit and SUPPORTS_FOURBIT and model_name in FLOAT_TO_INT_MAPPER:
+    elif load_in_4bit and SUPPORTS_FOURBIT and model_name.lower() in FLOAT_TO_INT_MAPPER:
         new_model_name = FLOAT_TO_INT_MAPPER[model_name.lower()]
         # logger.warning_once(
         #     f"Unsloth: You passed in `{model_name}` and `load_in_4bit = True`.\n"\
         #     f"We shall load `{new_model_name}` for 4x faster loading."
         # )
-        model_name = new_model_name
+        return new_model_name
     pass
 
-    return model_name
+    return None
 pass
 
 
-class FastLanguageModel(FastLlamaModel):
+def _get_new_mapper():
+    try:
+        import requests
+        new_mapper = "https://raw.githubusercontent.com/unslothai/unsloth/main/unsloth/models/mapper.py"
+        with requests.get(new_mapper, timeout = 3) as new_mapper: new_mapper = new_mapper.text
+        new_mapper = new_mapper[new_mapper.find("__INT_TO_FLOAT_MAPPER"):]
+        new_mapper = new_mapper\
+            .replace("INT_TO_FLOAT_MAPPER", "NEW_INT_TO_FLOAT_MAPPER")\
+            .replace("FLOAT_TO_INT_MAPPER", "NEW_FLOAT_TO_INT_MAPPER")
+        exec(new_mapper, globals())
+        return NEW_INT_TO_FLOAT_MAPPER, NEW_FLOAT_TO_INT_MAPPER
+    except:
+        return {}, {}
+    pass
+pass
+
+
+def _get_model_name(model_name, load_in_4bit = True):
+    new_model_name = __get_model_name(
+        model_name = model_name,
+        load_in_4bit = load_in_4bit,
+        INT_TO_FLOAT_MAPPER = INT_TO_FLOAT_MAPPER,
+        FLOAT_TO_INT_MAPPER = FLOAT_TO_INT_MAPPER,
+    )
+    if new_model_name is None and model_name.count("/") == 1 and model_name[0].isalnum():
+        # Try checking if a new Unsloth version allows it!
+        NEW_INT_TO_FLOAT_MAPPER, NEW_FLOAT_TO_INT_MAPPER = _get_new_mapper()
+        upgraded_model_name = __get_model_name(
+            model_name = model_name,
+            load_in_4bit = load_in_4bit,
+            INT_TO_FLOAT_MAPPER = NEW_INT_TO_FLOAT_MAPPER,
+            FLOAT_TO_INT_MAPPER = NEW_FLOAT_TO_INT_MAPPER,
+        )
+        if upgraded_model_name is not None:
+            raise NotImplementedError(
+                f"Unsloth: {model_name} is not supported in your current Unsloth version! Please update Unsloth via:\n\n"\
+                'pip uninstall unsloth -y\n'\
+                'pip install --upgrade --no-cache-dir "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"'
+            )
+        pass
+    pass
+    return new_model_name if new_model_name is not None else model_name
+pass
+
+
+class FastLanguageModel(FastLlamaModelSequenceClassification):
     @staticmethod
     def from_pretrained(
         model_name                 = "unsloth/llama-3-8b-bnb-4bit",
-        max_seq_length             = None,
+        max_seq_length             = 4096,
         dtype                      = None,
         load_in_4bit               = True,
         token                      = None,
@@ -83,6 +135,8 @@ class FastLanguageModel(FastLlamaModel):
         use_gradient_checkpointing = "unsloth",
         resize_model_vocab         = None,
         revision                   = None,
+        sequence_classification = False,
+        num_labels = None,
         *args, **kwargs,
     ):
         if token is None and "HF_TOKEN" in os.environ:
@@ -98,16 +152,22 @@ class FastLanguageModel(FastLlamaModel):
         from huggingface_hub.utils import disable_progress_bars, enable_progress_bars, are_progress_bars_disabled
         was_disabled = are_progress_bars_disabled()
         disable_progress_bars()
+
+        autoconfig_error = None
+        peft_error = None
         try:
             model_config = AutoConfig.from_pretrained(model_name, token = token, revision = revision)
             is_model = True
-        except:
+        except Exception as autoconfig_error:
+            autoconfig_error = str(autoconfig_error)
             is_model = False
         try:
             peft_config = PeftConfig .from_pretrained(model_name, token = token, revision = revision)
             is_peft = True
-        except:
+        except Exception as peft_error:
+            peft_error = str(peft_error)
             is_peft = False
+        pass
 
         # Cannot be both!
         if is_model and is_peft:
@@ -118,11 +178,7 @@ class FastLanguageModel(FastLlamaModel):
                 "Please separate the LoRA and base models to 2 repos."
             )
         elif not is_model and not is_peft:
-            raise RuntimeError(
-                f"Unsloth: `{model_name}` is not a base model or a PEFT model.\n"\
-                "We could not locate a `config.json` or `adapter_config.json` file.\n"\
-                "Are you certain the model name is correct? Does it actually exist?"
-            )
+            raise RuntimeError(autoconfig_error or peft_error)
         pass
 
         # Get base model for PEFT:
@@ -147,11 +203,14 @@ class FastLanguageModel(FastLlamaModel):
             if scaling_type == "llama3" and not SUPPORTS_LLAMA31:
                 raise ImportError(
                     f"Unsloth: Your transformers version of {transformers_version} does not support Llama 3.1.\n"\
-                    f"The minimum required version is 4.43.1\n"\
-                    f'Try `pip install --upgrade "transformers>=4.43.1"`\n'\
+                    f"The minimum required version is 4.43.2\n"\
+                    f'Try `pip install --upgrade "transformers>=4.43.2"`\n'\
                     f"to obtain the latest transformers build, then restart this session."\
                 )
-            dispatch_model = FastLlamaModel
+            if sequence_classification == True:   
+                dispatch_model = FastLlamaModelSequenceClassification
+            else:
+                dispatch_model = FastLlamaModel
         elif model_type == "mistral": dispatch_model = FastMistralModel
         elif model_type == "gemma":
             if not SUPPORTS_GEMMA:
@@ -189,22 +248,41 @@ class FastLanguageModel(FastLlamaModel):
         else:
             tokenizer_name = None
         pass
-
-        model, tokenizer = dispatch_model.from_pretrained(
-            model_name        = model_name,
-            max_seq_length    = max_seq_length,
-            dtype             = dtype,
-            load_in_4bit      = load_in_4bit,
-            token             = token,
-            device_map        = device_map,
-            rope_scaling      = rope_scaling,
-            fix_tokenizer     = fix_tokenizer,
-            model_patcher     = dispatch_model,
-            tokenizer_name    = tokenizer_name,
-            trust_remote_code = trust_remote_code,
-            revision          = revision if not is_peft else None,
-            *args, **kwargs,
-        )
+        
+        if sequence_classification == True and num_labels is not None:
+            model, tokenizer = dispatch_model.from_pretrained(
+                model_name     = model_name,
+                max_seq_length = max_seq_length,
+                dtype          = dtype,
+                load_in_4bit   = load_in_4bit,
+                token          = token,
+                device_map     = device_map,
+                rope_scaling   = rope_scaling,
+                fix_tokenizer  = fix_tokenizer,
+                model_patcher  = dispatch_model,
+                tokenizer_name = tokenizer_name,
+                trust_remote_code = trust_remote_code,
+                revision          = revision if not is_peft else None,
+                num_labels     = num_labels,
+                *args, **kwargs,
+            )
+            
+        else:
+            model, tokenizer = dispatch_model.from_pretrained(
+                model_name     = model_name,
+                max_seq_length = max_seq_length,
+                dtype          = dtype,
+                load_in_4bit   = load_in_4bit,
+                token          = token,
+                device_map     = device_map,
+                rope_scaling   = rope_scaling,
+                fix_tokenizer  = fix_tokenizer,
+                model_patcher  = dispatch_model,
+                tokenizer_name = tokenizer_name,
+                trust_remote_code = trust_remote_code,
+                revision          = revision if not is_peft else None,
+                *args, **kwargs,
+            )
         
         if resize_model_vocab is not None:
             model.resize_token_embeddings(resize_model_vocab)
